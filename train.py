@@ -120,13 +120,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, opt)
         image, language_feature_weight_map, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["language_feature_weight_map"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         # -------------------------
-        # W&B image logging (optional)
+        # W&B image logging
         # -------------------------
-        if iteration % 500 == 0:  # ← 必ず間引く（重要）
+        if iteration % 500 == 0:
             with torch.no_grad():
                 wandb.log(
                     {
-                        "render/train": wandb.Image(
+                        "rendered_image": wandb.Image(
                             image.permute(1, 2, 0).clamp(0, 1).cpu().numpy(),
                             caption=f"iter {iteration}",
                         )
@@ -134,12 +134,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     step=iteration,
                 )
 
-                # geometry のときだけ GT も送る
                 if not opt.include_feature:
                     gt_image = viewpoint_cam.original_image.cuda()
                     wandb.log(
                         {
-                            "gt/train": wandb.Image(
+                            "ground_truth": wandb.Image(
                                 gt_image.permute(1, 2, 0).clamp(0, 1).cpu().numpy()
                             )
                         },
@@ -162,14 +161,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 cosloss = cos_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)
                 loss += cosloss
                 wandb.log({
-                    "loss/cosine": cosloss.item(),
+                    "loss_cosine": cosloss.item(),
                 }, step=iteration)
             if args.l1_loss:
                 Ll1 = l1_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)   
                 loss += Ll1
                 wandb.log({
-                    "loss/l1": Ll1.item(),
-                    "loss/ssim": (1.0 - ssim(image, gt_image)).item(),
+                    "loss_l1": Ll1.item(),
+                    "loss_ssim": (1.0 - ssim(image, gt_image)).item(),
                 }, step=iteration)
 
         else:
@@ -193,9 +192,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
                 wandb.log({
-                    "train/loss": loss.item(),
-                    "train/ema_loss": ema_loss_for_log,
-                    "iter": iteration,
+                    "train_loss": loss.item(),
+                    "train_ema_loss": ema_loss_for_log,
+                    "iteration": iteration,
                 })
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -284,8 +283,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test /= len(config['cameras'])          
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 wandb.log({
-                    f"{config['name']}/l1": l1_test.item(),
-                    f"{config['name']}/psnr": psnr_test.item(),
+                    f"{config['name']}_l1": l1_test.item(),
+                    f"{config['name']}_psnr": psnr_test.item(),
                 }, step=iteration)
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
@@ -294,10 +293,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-            wandb.log({
-                "scene/num_gaussians": scene.gaussians.get_xyz.shape[0],
-                "scene/mean_opacity": scene.gaussians.get_opacity.mean().item(),
-            }, step=iteration)
+        wandb.log({
+            "scene_num_gaussians": scene.gaussians.get_xyz.shape[0],
+            "scene_mean_opacity": scene.gaussians.get_opacity.mean().item(),
+        }, step=iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
