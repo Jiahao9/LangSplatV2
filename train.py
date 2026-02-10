@@ -32,8 +32,19 @@ except ImportError:
 
 import matplotlib.pyplot as plt
 
+import wandb
+
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, args):
+    # -------------------------
+    # W&B init
+    # -------------------------
+    wandb.init(
+        project="LangSplatV2",
+        name=os.path.basename(args.model_path),
+        config=vars(args),
+    )
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -108,7 +119,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         opt.topk = args.topk
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, opt)
         image, language_feature_weight_map, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["language_feature_weight_map"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
+        # -------------------------
+        # W&B image logging (optional)
+        # -------------------------
+        if iteration % 500 == 0:  # ← 必ず間引く（重要）
+            with torch.no_grad():
+                wandb.log(
+                    {
+                        "render/train": wandb.Image(
+                            image.permute(1, 2, 0).clamp(0, 1).cpu().numpy(),
+                            caption=f"iter {iteration}",
+                        )
+                    },
+                    step=iteration,
+                )
+
+                # geometry のときだけ GT も送る
+                if not opt.include_feature:
+                    gt_image = viewpoint_cam.original_image.cuda()
+                    wandb.log(
+                        {
+                            "gt/train": wandb.Image(
+                                gt_image.permute(1, 2, 0).clamp(0, 1).cpu().numpy()
+                            )
+                        },
+                        step=iteration,
+                    )
+
+
         # Loss
         if opt.include_feature:
             # gt_language_feature [512 H W]
@@ -123,9 +161,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if args.cos_loss:
                 cosloss = cos_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)
                 loss += cosloss
+                wandb.log({
+                    "loss/cosine": cosloss.item(),
+                }, step=iteration)
             if args.l1_loss:
                 Ll1 = l1_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)   
                 loss += Ll1
+                wandb.log({
+                    "loss/l1": Ll1.item(),
+                    "loss/ssim": (1.0 - ssim(image, gt_image)).item(),
+                }, step=iteration)
 
         else:
             gt_image = viewpoint_cam.original_image.cuda()
@@ -147,6 +192,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/ema_loss": ema_loss_for_log,
+                    "iter": iteration,
+                })
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -180,6 +230,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 torch.save((gaussians.capture(opt.include_feature), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 if iteration == 30000:
                     return
+    wandb.finish()
             
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -232,6 +283,10 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                wandb.log({
+                    f"{config['name']}/l1": l1_test.item(),
+                    f"{config['name']}/psnr": psnr_test.item(),
+                }, step=iteration)
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -239,14 +294,15 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+            wandb.log({
+                "scene/num_gaussians": scene.gaussians.get_xyz.shape[0],
+                "scene/mean_opacity": scene.gaussians.get_opacity.mean().item(),
+            }, step=iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser)
-    op = OptimizationParams(parser)
-    pp = PipelineParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=55557)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -261,6 +317,15 @@ if __name__ == "__main__":
     parser.add_argument('--normalize', action='store_true', default=False)
     parser.add_argument('--accum_iter', type=int, default=1)
     parser.add_argument('--topk', type=int, default=1)
+    parser.add_argument('--include_feature_in_training', action='store_true', default=False)
+
+    temp_args, _ = parser.parse_known_args()
+    include_feature_in_training = temp_args.include_feature_in_training
+
+    lp = ModelParams(parser)
+    op = OptimizationParams(parser, include_feature_in_training)
+    pp = PipelineParams(parser)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     print(args)
